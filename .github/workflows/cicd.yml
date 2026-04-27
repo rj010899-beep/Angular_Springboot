@@ -1,0 +1,97 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  backend:
+    name: Build & Test Backend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build and test with Maven
+        working-directory: backend
+        run: mvn --batch-mode clean verify
+
+      - name: Upload backend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-jar
+          path: backend/target/*.jar
+          retention-days: 7
+
+  frontend:
+    name: Build & Test Frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build Angular app
+        working-directory: frontend
+        run: npm run build
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+          retention-days: 7
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: [ backend, frontend ]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+
+    steps:
+      - name: Download backend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-jar
+          path: artifacts/backend
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: artifacts/frontend
+
+      - name: List deployment artifacts
+        run: |
+          echo "=== Backend artifacts ==="
+          ls -lh artifacts/backend/
+          echo "=== Frontend artifacts ==="
+          find artifacts/frontend -type f | head -20
+
+      # Replace the step below with your actual deployment commands,
+      # e.g. scp to a server, push to a cloud provider, update a container image, etc.
+      - name: Deploy application
+        run: |
+          echo "Deployment step - configure this for your target environment."
+          echo "Backend JAR and frontend dist are available under artifacts/"
