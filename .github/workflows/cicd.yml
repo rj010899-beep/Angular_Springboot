@@ -96,8 +96,9 @@ jobs:
           echo "Deployment step - configure this for your target environment."
           echo "Backend JAR and frontend dist are available under artifacts/"
 
+
   log-analyzer:
-    name: Analyze Workflow Logs for Errors
+    name: Log Analyzer
     runs-on: ubuntu-latest
     needs: [backend, frontend, deploy]
     if: always()
@@ -106,195 +107,12 @@ jobs:
       contents: read
 
     steps:
-      - name: Fetch and analyze workflow logs
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.run_id }}
-          REPO: ${{ github.repository }}
-        run: |
-          python3 << 'PYEOF'
-          import os, re, json, urllib.request, urllib.error
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-          GH_TOKEN       = os.environ['GH_TOKEN']
-          RUN_ID         = os.environ['RUN_ID']
-          REPO           = os.environ['REPO']
-          SUMMARY_FILE   = os.environ.get('GITHUB_STEP_SUMMARY', '/dev/stdout')
-
-          HEADERS = {
-              'Authorization': f'Bearer {GH_TOKEN}',
-              'Accept': 'application/vnd.github+json',
-              'X-GitHub-Api-Version': '2022-11-28',
-          }
-
-          def api_get(url):
-              req = urllib.request.Request(url, headers=HEADERS)
-              with urllib.request.urlopen(req) as r:
-                  return json.loads(r.read())
-
-          def fetch_job_logs(job_id):
-              url = f'https://api.github.com/repos/{REPO}/actions/jobs/{job_id}/logs'
-              req = urllib.request.Request(url, headers=HEADERS)
-              try:
-                  with urllib.request.urlopen(req) as r:
-                      return r.read().decode('utf-8', errors='replace')
-              except urllib.error.HTTPError as e:
-                  location = e.headers.get('Location', '')
-                  if e.code in (301, 302) and location:
-                      with urllib.request.urlopen(location) as r:
-                          return r.read().decode('utf-8', errors='replace')
-              except urllib.error.URLError as e:
-                  print(f'Warning: could not fetch logs for job {job_id}: {e}')
-              return ''
-
-          # Error rules: (regex, severity, title, suggestion)
-          ERROR_RULES = [
-              # Maven / Java
-              (r'\[ERROR\].*BUILD FAILURE',
-               'critical', 'Maven BUILD FAILURE',
-               'Run `mvn --batch-mode clean verify` locally to reproduce. '
-               'Scroll up in the log to find the root compilation or test error.'),
-              (r'\[ERROR\].*cannot find symbol',
-               'error', 'Java: Cannot Find Symbol',
-               'A class, method, or variable is missing. Check imports, classpath, '
-               'and spelling. Run `mvn dependency:resolve` to verify dependencies.'),
-              (r'\[ERROR\].*package .+ does not exist',
-               'error', 'Java: Missing Package',
-               'A required package is not on the classpath. '
-               'Check `pom.xml` dependencies and run `mvn dependency:tree`.'),
-              (r'Tests run:.*(?:FAILURES|ERRORS)',
-               'error', 'Maven Test Failure',
-               'One or more unit tests failed. Run `mvn test` locally and inspect '
-               'reports in `backend/target/surefire-reports/`.'),
-              (r'OutOfMemoryError',
-               'critical', 'Java OutOfMemoryError',
-               'The JVM ran out of heap space. Increase `-Xmx` via `MAVEN_OPTS` '
-               'or optimise memory usage in the application.'),
-              (r'Could not resolve dependencies',
-               'error', 'Maven Dependency Resolution Failure',
-               'Dependencies could not be downloaded. Check `pom.xml`, Maven '
-               'repository settings, and any proxy/firewall configuration.'),
-
-              # NPM / Angular / TypeScript
-              (r'npm ERR!',
-               'error', 'NPM Error',
-               'An NPM error occurred. Run `npm ci` locally inside `frontend/` '
-               'to reproduce. Check `package.json` and `package-lock.json`.'),
-              (r'error TS\d+:',
-               'error', 'TypeScript Compilation Error',
-               'TypeScript type-checking failed. Run `npx tsc --noEmit` inside '
-               '`frontend/` to see all errors and fix type mismatches or imports.'),
-              (r'ERROR in .+',
-               'error', 'Angular Build Error',
-               'The Angular CLI reported a build error. Run `npm run build` '
-               'locally to see the full diagnostic output.'),
-              (r'Module not found:',
-               'error', 'Node Module Not Found',
-               'A required module is missing from `node_modules`. '
-               'Run `npm ci` to reinstall all dependencies from lock-file.'),
-              (r'ENOENT:.*no such file or directory',
-               'warning', 'File Not Found (ENOENT)',
-               'A required file or directory does not exist. Verify all '
-               'referenced paths and ensure every file is committed to the repo.'),
-              (r'(?:ENOMEM|heap out of memory)',
-               'critical', 'Node.js Out of Memory',
-               'Node.js ran out of heap. Set `NODE_OPTIONS=--max-old-space-size=4096` '
-               'in the build step or reduce the bundle size.'),
-
-              # General CI
-              (r'permission denied',
-               'warning', 'Permission Denied',
-               'A file or command was not accessible. '
-               'Check script permissions (`chmod +x`) and runner user privileges.'),
-              (r'No space left on device',
-               'critical', 'Disk Space Exhausted',
-               'The runner ran out of disk space. Clean up build artifacts '
-               'between steps or switch to a larger runner.'),
-              (r'(?:Connection refused|Could not connect|Network is unreachable)',
-               'warning', 'Network Connectivity Issue',
-               'A network connection failed. This is often transient — re-run the '
-               'workflow. If persistent, check external service availability.'),
-              (r'Process completed with exit code [1-9]',
-               'error', 'Step Exited with Non-Zero Code',
-               'A shell command returned a failure exit code. Check the output '
-               'immediately above this line in the log for the specific error.'),
-          ]
-
-          SEVERITY_EMOJI = {'critical': '🔴', 'error': '🟠', 'warning': '🟡'}
-
-          def analyse_logs(log_text):
-              findings = []
-              lines = log_text.splitlines()
-              for pattern, severity, title, suggestion in ERROR_RULES:
-                  regex = re.compile(pattern, re.IGNORECASE)
-                  matches = [ln.strip() for ln in lines if regex.search(ln)]
-                  if matches:
-                      findings.append({
-                          'severity': severity,
-                          'title': title,
-                          'suggestion': suggestion,
-                          'examples': matches[:3],
-                      })
-              return findings
-
-          jobs_resp    = api_get(f'https://api.github.com/repos/{REPO}/actions/runs/{RUN_ID}/jobs')
-          all_findings = {}
-          job_statuses = {}
-
-          for job in jobs_resp.get('jobs', []):
-              name       = job['name']
-              conclusion = job.get('conclusion')
-              job_id     = job['id']
-
-              if 'Analyze Workflow Logs' in name:
-                  continue
-              if conclusion == 'skipped':
-                  job_statuses[name] = conclusion
-                  continue
-
-              job_statuses[name] = conclusion
-              logs = fetch_job_logs(job_id)
-              if logs:
-                  findings = analyse_logs(logs)
-                  if findings:
-                      all_findings[name] = findings
-
-          with open(SUMMARY_FILE, 'a') as f:
-              f.write('# 🔍 Workflow Log Analysis Report\n\n')
-
-              if not all_findings:
-                  f.write('## ✅ No Errors Detected\n\n')
-                  f.write('All analysed workflow jobs completed without detectable errors.\n\n')
-              else:
-                  total = sum(len(v) for v in all_findings.values())
-                  f.write(f'## ⚠️ Found {total} issue(s) across {len(all_findings)} job(s)\n\n')
-
-                  for job_name, findings in all_findings.items():
-                      conclusion  = job_statuses.get(job_name, 'unknown')
-                      status_icon = '❌' if conclusion == 'failure' else '⚠️'
-                      f.write(f'### {status_icon} Job: `{job_name}`\n\n')
-
-                      for finding in findings:
-                          emoji = SEVERITY_EMOJI.get(finding['severity'], '⚪')
-                          f.write(f'#### {emoji} {finding["title"]}\n\n')
-                          f.write(f'**💡 Suggestion:** {finding["suggestion"]}\n\n')
-                          if finding['examples']:
-                              f.write('**📋 Relevant log lines:**\n```\n')
-                              for ex in finding['examples']:
-                                  f.write(f'{ex}\n')
-                              f.write('```\n\n')
-
-              f.write('---\n## 📊 Job Status Overview\n\n')
-              f.write('| Job | Status |\n|-----|--------|\n')
-              icons = {
-                  'success': '✅', 'failure': '❌',
-                  'skipped': '⏭️', 'cancelled': '🚫',
-              }
-              for job in jobs_resp.get('jobs', []):
-                  if 'Analyze Workflow Logs' in job['name']:
-                      continue
-                  conclusion = job.get('conclusion') or 'in_progress'
-                  icon = icons.get(conclusion, '⏳')
-                  f.write(f'| {job["name"]} | {icon} {conclusion} |\n')
-
-          print('✅ Log analysis complete — check the Job Summary tab for the full report.')
-          PYEOF
+      - name: Run log analyzer agent
+        uses: ./.github/actions/log-analyzer
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          repository: ${{ github.repository }}
