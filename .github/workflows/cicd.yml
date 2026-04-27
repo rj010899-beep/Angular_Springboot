@@ -95,3 +95,36 @@ jobs:
         run: |
           echo "Deployment step - configure this for your target environment."
           echo "Backend JAR and frontend dist are available under artifacts/"
+
+
+  log-analyzer:
+    name: Log Analyzer
+    runs-on: ubuntu-latest
+    needs: [backend, frontend, deploy]
+    if: always()
+    permissions:
+      issues: write
+      actions: read
+      contents: read
+
+    steps:
+      - name: Create issue to invoke log-analyzer agent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BODY="@copilot Run the log-analyzer agent for workflow run ${{ github.run_id }}
+
+          **Context**
+          - Repository: \`${{ github.repository }}\`
+          - Run ID: \`${{ github.run_id }}\`
+          - Run number: \`${{ github.run_number }}\`
+          - Workflow: \`${{ github.workflow }}\`
+          - Branch: \`${{ github.ref_name }}\`
+          - Triggered by: \`${{ github.event_name }}\`
+          - Commit: \`${{ github.sha }}\`"
+
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "CI Log Analysis — ${{ github.workflow }} run #${{ github.run_number }}" \
+            --body "$BODY" \
+            --label "ci-log-analysis"
